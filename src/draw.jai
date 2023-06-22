@@ -146,6 +146,7 @@ draw_welcome_screen :: (main_area: Rect) {
             .{ .show_open_file_dialog_in_search_mode,               "Open File By Name" },
             .{ .show_open_file_dialog_in_navigate_mode,             "Navigate To File" },
             .{ .show_open_file_dialog_in_navigate_mode_from_root,   "Navigate To File From Root" },
+            .{ .show_open_file_dialog_in_editor_mode,               "Switch Editors" },
             .{ .search_in_buffer,                                   "Search In Open File" },
             .{ .search_in_buffer_dropdown_mode,                     "Search In Open File (Dropdown Mode)" },
             .{ .search_in_project,                                  "Search In Workspace" },
@@ -1291,6 +1292,7 @@ draw_open_file_dialog :: () {
         }
     } else {
         label := ifx path_chunks then "" else " Navigate to file";
+        if mode == .editor then label = "Search editors by name";
 
         half_padding := floor(padding / 2);
 

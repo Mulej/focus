@@ -282,6 +282,7 @@ ACTIONS_COMMON :: string.[
     "show_open_file_dialog_in_search_mode",
     "show_open_file_dialog_in_navigate_mode",
     "show_open_file_dialog_in_navigate_mode_from_root",
+    "show_open_file_dialog_in_editor_mode",
     "copy",
     "cut",
     "paste",
