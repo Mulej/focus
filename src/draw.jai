@@ -1290,9 +1290,8 @@ draw_open_file_dialog :: () {
             progress_bar_rect.w *= scan_progress;
             draw_rect(progress_bar_rect, Colors.LIST_CURSOR_LITE);
         }
-    } else {
+    } else if mode == .navigate {
         label := ifx path_chunks then "" else " Navigate to file";
-        if mode == .editor then label = "Search editors by name";
 
         half_padding := floor(padding / 2);
 
@@ -1342,6 +1341,10 @@ draw_open_file_dialog :: () {
             Simp.draw_prepared_text(font_ui, xx (dir_rect.x + padding + half_padding), xx text_y, Colors.UI_DEFAULT);
             dir_rect.x += dir_rect.w + half_padding;
         }
+    } else if mode == .editor {
+        label := " Search editors by name";
+
+        draw_text_input(*open_file_dialog.input, input_rect, ui_id = input_id, active = true, label = label);
     }
 
     _pad: Rect = ---;  // allow some space at the bottom so that we don't cover up the rounded corners with the cursor
