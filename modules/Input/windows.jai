@@ -173,7 +173,13 @@ get_vk :: (key: Key_Code) -> VK: u64 {
 
 MyWindowProc :: (hwnd: HWND, message: u32,
                  wParam: WPARAM, lParam: LPARAM) -> s64 #c_call {
-    push_context windows_main_context {
+
+    new_context: Context;
+    new_context.allocator = Context.default_allocator;
+    new_context.logger    = Context.default_logger;
+    new_context.simp      = windows_main_context.simp;  // Needed to get draw_frame to work when we get WM_PAINT
+
+    push_context new_context {
         using Key_Code;
 
         if message == {
