@@ -399,6 +399,24 @@ refresh_entries :: (clear_input := true) {
             // This bit will be set when we want to make sure an entry appears on top
             top_priority_bit: u64 = 1 << 62;  // NOT the topmost bit because we'll be converting to s64 later
 
+            path_part: [] string;
+            name_part: [] string;
+
+            slash_index := -1;
+
+            for < char, char_index: filter_chars {
+                if char == "/" {
+                    slash_index = char_index;
+                    break;
+                }
+            }
+
+            path_part.data = filter_chars.data;
+            path_part.count = slash_index;
+
+            name_part.data = filter_chars.data + path_part.count + 1; // Skip the slash
+            name_part.count = filter_chars.count - path_part.count - 1;
+
             for editor : open_editors {
                 buffer_id := editor.buffer_id;
                 buffer := open_buffers[buffer_id];
@@ -422,25 +440,7 @@ refresh_entries :: (clear_input := true) {
 
                 if score < 0 {
                     // Try to match the whole path with name.
-                    path_part: [] string;
-                    name_part: [] string;
-
-                    slash_index := -1;
-
-                    for < char, char_index: filter_chars {
-                        if char == "/" {
-                            slash_index = char_index;
-                            break;
-                        }
-                    }
-
-                    if slash_index == -1 continue;
-
-                    path_part.data = filter_chars.data;
-                    path_part.count = slash_index;
-
-                    name_part.data = filter_chars.data + path_part.count + 1; // Skip the slash
-                    name_part.count = filter_chars.count - path_part.count - 1;
+                    if slash_index == -1 continue; // There was no slash in filter_chars.
 
                     name_score, name_highlights = fuzzy_match(buffer_name, name_part);
                     path_score, path_highlights = fuzzy_match(buffer.file.path, path_part);
