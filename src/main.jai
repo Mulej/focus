@@ -23,7 +23,7 @@ main :: () {
     if !projects_dir_existed then write_entire_file(tprint("%/Example Project.focus-config", projects_dir), EXAMPLE_PROJECT_FILE_DATA);
 
     init_file_watcher();
-    load_global_config(true);
+    load_global_config(fallback_to_default_on_failure = true);
     init_workspace();
     init_buffers();
 
@@ -298,7 +298,6 @@ handle_common_editor_action :: (action: Action_Editors, placement: Editor_Placem
         case .open_project; /* deprecated */                    show_open_project_dialog();                         return true;
         case .switch_to_project;                                show_open_project_dialog();                         return true;
         case .open_projects_directory;                          platform_open_in_explorer(projects_dir);            return true;
-        case .open_containing_folder;                           open_current_file_directory();                      return true;
         case .open_global_config;                               editors_open_global_config(placement);              return true;
         case .open_project_config;                              editors_open_project_config(placement);             return true;
 
@@ -309,7 +308,6 @@ handle_common_editor_action :: (action: Action_Editors, placement: Editor_Placem
         case .show_open_file_dialog_in_search_mode;             show_open_file_dialog(.search);                     return true;
         case .show_open_file_dialog_in_navigate_mode;           show_open_file_dialog(.navigate);                   return true;
         case .show_open_file_dialog_in_navigate_mode_from_root; show_open_file_dialog(.navigate, from_root = true); return true;
-        case .show_open_file_dialog_in_editor_mode;             show_open_file_dialog(.editor);                    return true;
 
         case .show_commands;                                    show_commands_dialog();                             return true;
 
@@ -449,12 +447,6 @@ update_mouse_state :: () {
     update_button(*mouse.left,   .MOUSE_BUTTON_LEFT);
     update_button(*mouse.right,  .MOUSE_BUTTON_RIGHT);
     update_button(*mouse.middle, .MOUSE_BUTTON_MIDDLE);
-}
-
-open_current_file_directory :: () {
-    editor, buffer := get_active_editor_and_buffer();
-
-    platform_open_in_explorer(buffer.file.full_path, true);
 }
 
 increase_font_size :: () {
