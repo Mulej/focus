@@ -128,6 +128,22 @@ should_ignore_file :: (path: string) -> bool {
         for config.workspace.ignore_file_extension_wildcards {
             if wildcard_match(extension, it) return true;
         }
+
+        // Check the global allow list
+        for saved_global_config.workspace.allow_file_extensions {
+            if ends_with_nocase(path, it) return false;
+        }
+        for saved_global_config.workspace.allow_file_extension_wildcards {
+            if wildcard_match(extension, it) return false;
+        }
+
+        // Check the global disallow list
+        for saved_global_config.workspace.ignore_file_extensions {
+            if ends_with_nocase(path, it) return true;
+        }
+        for saved_global_config.workspace.ignore_file_extension_wildcards {
+            if wildcard_match(extension, it) return true;
+        }
     }
     if begins_with_nocase(path, temp_dir) return true;  // explicitly ignore our own temp dir
 
