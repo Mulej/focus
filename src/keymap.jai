@@ -324,7 +324,6 @@ ACTIONS_COMMON :: string.[
     "open_containing_folder",
 
     "dump_key_mappings",
-    "dump_editor_history",
 ];
 
 ACTIONS_EDITORS :: #run arrays_concat(ACTIONS_COMMON, string.[
