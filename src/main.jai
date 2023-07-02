@@ -72,6 +72,7 @@ main :: () {
     window_width, window_height = Simp.get_render_dimensions(window);
     screen = make_rect(0, 0, window_width, window_height);
     Simp.set_render_target(window);
+    simp_initialized = true;
 
     // Init logger after we know the session dir and the config
     init_logger();
@@ -540,6 +541,7 @@ redraw_requested        := true;  // set to true to render the first frame
 should_quit             := false;
 force_quit              := false;
 should_reload_workspace := false;
+simp_initialized        := false;
 
 frame_time: Time;                 // ever-increasing time since start in seconds
 frame_dt:   Time = MAX_FRAME_DT;  // time delta since the last frame

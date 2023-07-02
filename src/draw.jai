@@ -1,4 +1,6 @@
 draw_frame :: () {
+    if !simp_initialized then return; // We haven't initialized simp yet, just return.
+
     {
         using Colors.BACKGROUND_DARK;
         Simp.clear_render_target(r, g, b, a);
