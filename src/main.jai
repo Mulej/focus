@@ -1,5 +1,3 @@
-DEBUG_FILE_REFRESH :: true;
-
 main :: () {
     cpu_info = get_cpu_info();
 
@@ -94,6 +92,11 @@ main :: () {
         press_count := 0;
     };
 
+    // On Wayland and X11 the main window needs to be mapped before we can get input focus.
+    // Thus we force one draw here in order to ensure we start the main loop with the window
+    // in the correct state.
+    draw_frame();
+
     while !should_quit {
         if !redraw_requested platform_wait_message();
 
@@ -112,6 +115,7 @@ main :: () {
                 window_width = it.width;
                 window_height = it.height;
                 if should_reinit {
+                    // Cleanup: revisit this code, it's been touched by multiple people and needs simplification
                     screen    = make_rect(0, 0, window_width, window_height);
                     dpi_scale = platform_get_dpi_scale(window);
                     init_fonts_and_dependent_things();
@@ -130,15 +134,17 @@ main :: () {
         screen_with_title_bar.h += 200;  // should be enough to include the title bar
 
         #if OS != .WINDOWS {
-            if !Input.input_application_has_focus {
-                // Avoid changing the cursor when the window is not in Focus.
-                // This also fixes the Cmd+Tab cursor-spawning issue where the window still thinks Cmd is held down.
+            nothing_to_do_this_frame := !redraw_requested && !Input.events_this_frame.count && !mouse.moved_this_frame;
+
+            if !Input.input_application_has_focus && nothing_to_do_this_frame {
+                // Avoid changing the cursor when the window is not in Focus, but only when we don't have anything else to
+                // do this frame. This also fixes the Cmd+Tab cursor-spawning issue where the window still thinks Cmd is held down.
                 sleep_milliseconds(1);
                 continue;
             }
 
             // Try to avoid hot-looping on Linux/macOS
-            if !redraw_requested && !Input.events_this_frame.count && !mouse.moved_this_frame {
+            if nothing_to_do_this_frame {
                 sleep_milliseconds(1);
                 continue;
             }
@@ -317,6 +323,9 @@ handle_common_editor_action :: (action: Action_Editors, placement: Editor_Placem
         case .move_to_previous_editor_history;                  move_to_previous_editor_history();                  return true;
         case .move_to_next_editor_history;                      move_to_next_editor_history();                      return true;
 
+        case .move_to_previous_buffer;                          move_to_previous_editor_history(by_buffer = true);  return true;
+        case .move_to_next_buffer;                              move_to_next_editor_history    (by_buffer = true);  return true;
+
         // TODO: search_in_buffer
         case .search_in_project;
             if active_global_widget == .editors then finder_open_from_editor(); else finder_open();
@@ -390,7 +399,7 @@ init_fonts_and_dependent_things :: () {
     }
     append(*common_icons, PEN_ICON);
     append(*common_icons, XMARK_ICON);
-    icons_string := builder_to_string(*common_icons);
+    icons_string := builder_to_string(*common_icons, allocator = temp);
 
     Simp.prepare_text(font_icons,       icons_string);
     Simp.prepare_text(font_icons_tiny, icons_string);
@@ -521,6 +530,11 @@ update_window_size :: (w: s64, h: s64) {
     window_height = h;
     Simp.update_window(window);
     screen = make_rect(0, 0, window_width, window_height);
+    new_dpi_scale := platform_get_dpi_scale(window);
+    if new_dpi_scale != dpi_scale {
+        dpi_scale = new_dpi_scale;
+        init_fonts_and_dependent_things();
+    }
 }
 
 // Important directories
@@ -745,8 +759,6 @@ File_Async :: #import "File_Async";
 Simp  :: #import "Simp";
 Input :: #import "Input";
 
-DEBUG :: #run get_build_options().math_bounds_check == .FATAL;  // this is a sloppy way of checking whether we're in debug mode!
-
 MAX_BUFFER_SIZE_FOR_HIGHLIGHTS :: 5 * 1024 * 1024;
 
 #scope_file
@@ -760,11 +772,11 @@ MODS_CTRL_SHIFT     :: #run Mods.{ ctrl_pressed = true, shift_pressed = true }.p
 MODS_CTRL_ALT       :: #run Mods.{ ctrl_pressed = true, alt_pressed   = true }.packed;
 MODS_CTRL_ALT_SHIFT :: #run Mods.{ ctrl_pressed = true, alt_pressed   = true, shift_pressed = true }.packed;
 
-MIN_WINDOW_WIDTH  :: 50;
-MIN_WINDOW_HEIGHT :: 50;
-
 
 #scope_export
+
+MIN_WINDOW_WIDTH  :: 100;
+MIN_WINDOW_HEIGHT :: 100;
 
 DOUBLE_CLICK_SPEED     :: 0.3;  // how many seconds between clicks to consider it a double click
 DOUBLE_CLICK_TOLERANCE :: 2;    // how many pixels between the click locations are allowed
@@ -791,3 +803,5 @@ Embedded_Font :: struct {
     name: string;
     data: string;
 }
+
+DEBUG_FILE_REFRESH :: false;  // TODO: remove when done debugging

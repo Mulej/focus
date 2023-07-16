@@ -114,7 +114,7 @@ active_editor_handle_event :: (event: Input.Event, action: Action_Editors) -> ha
                 case .move_up_one_page;             search_bar_move_cursor(editor, buffer, -per_page);             return true;
                 case .move_down_one_page;           search_bar_move_cursor(editor, buffer,  per_page);             return true;
 
-                case .open_entry_in_place;          close_search_bar(editor);                                      return true;
+                case .open_entry_in_place;          close_search_bar(editor, jump_to_selected_result = true);      return true;
                 case .open_entry_on_the_side;       search_bar_open_selected_result(editor, buffer, .on_the_side); return true;
                 case .open_entry_on_the_left;       search_bar_open_selected_result(editor, buffer, .left);        return true;
                 case .open_entry_on_the_right;      search_bar_open_selected_result(editor, buffer, .right);       return true;
@@ -231,6 +231,9 @@ active_editor_handle_event :: (event: Input.Event, action: Action_Editors) -> ha
         case .delete_to_start_of_line;          delete_to_start_of_line             (editor, buffer);
         case .delete_to_end_of_line;            delete_to_end_of_line               (editor, buffer);
 
+        case .toggle_line_wrap;                 toggle_line_wrap                    (editor);
+        case .toggle_line_numbers;              toggle_line_numbers                 ();
+
         case;                                   return false;
     }
 
@@ -245,7 +248,10 @@ active_editor_handle_event :: (event: Input.Event, action: Action_Editors) -> ha
     // NOTE: even though we also do it in refresh_open_buffers, we do it here
     // so that if more than one event is processed in the same frame, the next one
     // sees the cursors in valid places and up to date
-    if buffer.dirty rescan_for_lines(buffer);
+    if buffer.dirty {
+        rescan_for_lines(buffer);
+        if line_wrap_is_active(editor) then rescan_for_wrapped_lines(editor, buffer);
+    }
     for * cursors put_cursor_in_valid_spot(it, buffer);
     if cursors.count > 1 then organise_cursors(editor);  // sort and maybe merge overlapping cursors
 
@@ -311,6 +317,8 @@ active_editor_type_char :: (char: u32) {
     if new_group then new_edit_group(buffer, editor);  // make sure selection operations have a dedicated group
 
     rescan_for_lines(buffer);
+    if line_wrap_is_active(editor) then rescan_for_wrapped_lines(editor, buffer);
+
     if editor.cursors.count > 1 then organise_cursors(editor);
     for * cursor : editor.cursors  cursor.col_wanted = -1;
 
@@ -330,6 +338,8 @@ refresh_all_editors_for_buffer :: (buffer_id: s64) {
     buffer := *open_buffers[buffer_id];
     for * editor, editor_id : open_editors {
         if editor.buffer_id != buffer_id continue;
+
+        if editor.line_wrap == .on then rescan_for_wrapped_lines(editor, buffer);
 
         adjust_cursors_and_viewport(editor, buffer, editor_id);
         editor.refresh_highlights = true;
@@ -465,7 +475,7 @@ move_viewport :: (editor: *Editor, dir: enum { left; up; right; down; }) {
         case .down;
             vert_delta := cast(s32) (10 * line_height);
             new_target := ifx dir == .up then scroll_y.target - vert_delta else scroll_y.target + vert_delta;
-            new_target = clamp(new_target, 0, get_max_y_scroll(open_buffers[editor.buffer_id]));
+            new_target = clamp(new_target, 0, get_max_y_scroll(editor, open_buffers[editor.buffer_id]));
             start_animation(*scroll_y, top, new_target, snappy = true);
     }
 }
@@ -480,7 +490,7 @@ move_cursor_to_viewport_center :: (editor: *Editor, buffer: Buffer) {
     // If that ever changes we'll need to change this code (and do it when we know the layout)
     cursor_px_pos := editor.viewport.top +  window_height / 2;
     coords := Coords.{ line = xx (cursor_px_pos / line_height), col = 0 };
-    cursor.pos = coords_to_offset(buffer, coords);
+    cursor.pos = coords_to_offset(editor, buffer, coords);
     cursor.sel = cursor.pos;
     editor.cursor_moved = .refresh_only;
 }
@@ -549,9 +559,18 @@ organise_cursors :: (using editor: *Editor, selection_mode: *Selection_Mode = xx
     }
 }
 
-get_max_y_scroll :: (buffer: Buffer) -> s32 {
+get_max_line_num :: (editor: Editor, buffer: Buffer) -> s32 {
     assert(!buffer.dirty);
-    return max(cast(s32) ((buffer.line_starts.count - 2)  * line_height), 0);
+    return cast(s32) get_line_starts(editor, buffer).count - 2;
+}
+
+get_max_real_line_num :: inline (buffer: Buffer) -> s32 {
+    return cast(s32) buffer.line_starts.count - 2;
+}
+
+get_max_y_scroll :: (editor: Editor, buffer: Buffer) -> s32 {
+    assert(!buffer.dirty);
+    return max(cast(s32) (get_max_line_num(editor, buffer)  * line_height), 0);
 }
 
 add_paste_animation :: (using editor: *Editor, range: Offset_Range) {
@@ -680,7 +699,7 @@ open_search_bar :: (using editor: *Editor, buffer: Buffer, requested_mode: Searc
     if cursors.count == 1 {
         cursor := cursors[0];
         selected_text := get_selected_string(cursor, buffer);
-        if selected_text && offset_to_line(buffer, cursor.pos) == offset_to_line(buffer, cursor.sel) {
+        if selected_text && offset_to_line(editor, buffer, cursor.pos) == offset_to_line(editor, buffer, cursor.sel) {
             replace_text(*input, selected_text);
         }
     }
@@ -701,13 +720,20 @@ open_search_bar :: (using editor: *Editor, buffer: Buffer, requested_mode: Searc
     scroll_to_selected = .snap;
 }
 
-close_search_bar :: inline (editor: *Editor, jump_to_original_cursor := false) {
+close_search_bar :: inline (editor: *Editor, jump_to_original_cursor := false, jump_to_selected_result := false) {
     using editor.search_bar;
     active = false;  // stop receiving input immediately
 
     if jump_to_original_cursor && jumped {
         cursor := leave_only_original_cursor(editor);
         cursor.state = original_cursor_position;
+        editor.scroll_to_cursor = .yes;
+    }
+
+    if jump_to_selected_result && results {
+        cursor := leave_only_original_cursor(editor);
+        cursor.sel = xx results[selected_result].offset;
+        cursor.pos = xx (cursor.sel + input.text.count);
         editor.scroll_to_cursor = .yes;
     }
 
@@ -810,7 +836,7 @@ search_and_update_results :: (using editor: *Editor, buffer: Buffer, jump := fal
         if !whole_word || (whole_word && match_whole_word(buffer_str, offset, needle.count)) {
             result := array_add(*results);
             result.offset = offset;
-            result.line = offset_to_line(buffer, offset);
+            result.line = offset_to_real_line(buffer, offset);
             if selected_result < 0 && result.offset >= search_point_offset then selected_result = i;
             i += 1;
         }
@@ -903,16 +929,16 @@ select_lines :: (editor: *Editor, buffer: Buffer) {
 
 select_line :: (cursor: *Cursor, buffer: Buffer) {
     selection  := get_selection(cursor);
-    start_line := offset_to_line(buffer, selection.start);
-    end\ _line := ifx selection.start != selection.end then offset_to_line(buffer, selection.end) else start_line;
-    cursor.sel = get_line_start_offset(buffer, start_line);
-    cursor.pos = get_line_start_offset(buffer, end_line+1);
+    start_line := offset_to_real_line(buffer, selection.start);
+    end\ _line := ifx selection.start != selection.end then offset_to_real_line(buffer, selection.end) else start_line;
+    cursor.sel = get_real_line_start_offset(buffer, start_line);
+    cursor.pos = get_real_line_start_offset(buffer, end_line+1);
 }
 
 scan_through_similar_chars_on_the_left :: (using buffer: Buffer, offset: s32, char_type: Char_Type = .none, skip_one_space := true) -> offset: s32 {
     if !buffer.bytes return 0;
 
-    line_start := bytes.data + line_starts[offset_to_line(buffer, offset)];
+    line_start := bytes.data + line_starts[offset_to_real_line(buffer, offset)];
     char: u32;
     t := bytes.data + offset;
     t, char = unicode_prev_character(t);
@@ -997,14 +1023,16 @@ remove_all_editors :: () {
     array_reset_keeping_memory(*open_editors);
 }
 
-viewport_remember_glue_point :: (using viewport: *Viewport, buffer: Buffer) {
-    glue_point.buffer_pos = get_line_start_offset(buffer, top / cast(s32) line_height);
-    glue_point.offset_within_line = top % cast(s32) line_height;
+viewport_remember_glue_point :: (using editor: *Editor, buffer: Buffer) {
+    viewport.glue_point.buffer_pos = get_line_start_offset(editor, buffer, viewport.top / cast(s32) line_height);
+    viewport.glue_point.offset_within_line = viewport.top % cast(s32) line_height;
 }
 
-viewport_glue_to_point :: (using viewport: *Viewport, buffer: Buffer) -> changed: bool {
+viewport_glue_to_point :: (editor: *Editor, buffer: Buffer) -> changed: bool {
+    using editor.viewport;
+
     old_top := top;
-    line := offset_to_line(buffer, glue_point.buffer_pos);
+    line := offset_to_line(editor, buffer, glue_point.buffer_pos);
     top = line * cast(s32) line_height + glue_point.offset_within_line;
     scroll_y.target = top;
     return top != old_top;
@@ -1041,6 +1069,11 @@ update_window_title :: (buffer_id: s64 = -1) {
     platform_set_window_title(title);
 }
 
+line_wrap_is_active :: inline (editor: Editor) -> bool {
+    // Even if it's marked to disable, it's still active until the next frame
+    return editor.line_wrap == .on || editor.line_wrap == .to_disable;
+}
+
 #scope_file
 
 create_cursor :: (using editor: *Editor, buffer: Buffer, where: enum { above; below; }) {
@@ -1048,24 +1081,24 @@ create_cursor :: (using editor: *Editor, buffer: Buffer, where: enum { above; be
 
     edge_cursor := ifx where == .above then cursors[0] else cursors[cursors.count-1];
     original    := cursors[original_cursor];
-    original_pos_coords := offset_to_coords(buffer, original.pos);
-    original_sel_coords := offset_to_coords(buffer, original.sel);
+    original_pos_coords := offset_to_coords(editor, buffer, original.pos);
+    original_sel_coords := offset_to_coords(editor, buffer, original.sel);
 
     cursor := array_add(*cursors);
     << cursor  = edge_cursor;
 
-    pos_coords := offset_to_coords(buffer, cursor.pos);
+    pos_coords := offset_to_coords(editor, buffer, cursor.pos);
     if where == .above then pos_coords.line -= 1; else pos_coords.line += 1;
     pos_coords.col = original_pos_coords.col;
 
-    cursor.pos = coords_to_offset(buffer, pos_coords);
+    cursor.pos = coords_to_offset(editor, buffer, pos_coords);
     cursor.col_wanted = original_pos_coords.col;
 
     if has_selection(original) {
         sel_coords := pos_coords;
         sel_coords.line += original_sel_coords.line - original_pos_coords.line;
         sel_coords.col  += original_sel_coords.col  - original_pos_coords.col;
-        cursor.sel = coords_to_offset(buffer, sel_coords);
+        cursor.sel = coords_to_offset(editor, buffer, sel_coords);
     } else {
         cursor.sel = cursor.pos;
     }
@@ -1269,6 +1302,11 @@ find_or_create_editor :: (buffer_id: s64, unwanted_existing_editor: s64 = -1) ->
     editor.buffer_id = buffer_id;
     array_add(*editor.cursors, Cursor.{});
 
+    if config.settings.line_wrap_is_on_by_default {
+        editor.line_wrap = .to_enable;
+        redraw_requested = true;
+    }
+
     open_buffers[buffer_id].num_editors_open += 1;
     assert(open_buffers[buffer_id].num_editors_open <= 2);
 
@@ -1443,15 +1481,15 @@ move_cursors_vertically :: (editor: *Editor, using buffer: Buffer, delta: s32, e
             if cursor.pos != new_pos {
                 // Move cursor to the beginning of the selection and update col_wanted
                 cursor.pos = new_pos;
-                coords := offset_to_coords(buffer, cursor.pos);
+                coords := offset_to_coords(editor, buffer, cursor.pos);
                 cursor.col_wanted = coords.col;
             }
         }
-        coords := offset_to_coords(buffer, cursor.pos);
+        coords := offset_to_coords(editor, buffer, cursor.pos);
         coords.line += delta;
         if cursor.col_wanted < 0 then cursor.col_wanted = coords.col;
         coords.col = cursor.col_wanted;
-        cursor.pos = coords_to_offset(buffer, coords);
+        cursor.pos = coords_to_offset(editor, buffer, coords);
     }
 
     if delta < 0  editor.cursor_moved = .moved_up;
@@ -1460,19 +1498,20 @@ move_cursors_vertically :: (editor: *Editor, using buffer: Buffer, delta: s32, e
 
 move_cursors_to_empty_line :: (editor: *Editor, buffer: Buffer, dir: enum { up; down; }) {
     for * cursor : editor.cursors {
-        line := offset_to_line(buffer, cursor.pos);
+        line := offset_to_real_line(buffer, cursor.pos);
         if dir == .up {
             while line > 0 {
                 line -= 1;
                 if is_empty(buffer, line) break;
             }
         } else {
-            while line < buffer.line_starts.count - 2 {
+            max_line := get_max_real_line_num(buffer);
+            while line < max_line {
                 line += 1;
                 if is_empty(buffer, line) break;
             }
         }
-        cursor.pos = coords_to_offset(buffer, Coords.{ line = line, col = cursor.col_wanted });
+        cursor.pos = real_coords_to_offset(buffer, Coords.{ line = line, col = cursor.col_wanted });
     }
 
     if dir == .up  editor.cursor_moved = .moved_up;
@@ -1483,13 +1522,13 @@ move_cursors_by_page :: (editor: *Editor, buffer: Buffer, dir: enum { up; down; 
     page_size := cast(s32) (window_height / line_height);
 
     for * cursor : editor.cursors {
-        line := offset_to_line(buffer, cursor.pos);
+        line := offset_to_line(editor, buffer, cursor.pos);
         if dir == .up {
             line -= page_size;
         } else {
             line += page_size;
         }
-        cursor.pos = coords_to_offset(buffer, Coords.{ line = line, col = cursor.col_wanted });
+        cursor.pos = coords_to_offset(editor, buffer, Coords.{ line = line, col = cursor.col_wanted });
     }
 
     if dir == .up  editor.cursor_moved = .moved_up;
@@ -1498,8 +1537,8 @@ move_cursors_by_page :: (editor: *Editor, buffer: Buffer, dir: enum { up; down; 
 
 move_cursors_home :: (editor: *Editor, buffer: Buffer) {
     for * cursor : editor.cursors {
-        line := offset_to_line(buffer, cursor.pos);
-        start, end := get_line_start_offset(buffer, line), get_line_end_offset(buffer, line);
+        line := offset_to_real_line(buffer, cursor.pos);
+        start, end := get_real_line_start_offset(buffer, line), get_real_line_end_offset(buffer, line);
 
         text_start_col: s32 = 0;
         i := start;
@@ -1518,8 +1557,8 @@ move_cursors_home :: (editor: *Editor, buffer: Buffer) {
 
 move_cursors_end :: (editor: *Editor, buffer: Buffer) {
     for * cursor : editor.cursors {
-        line := offset_to_line(buffer, cursor.pos);
-        cursor.pos = get_line_end_offset(buffer, line);
+        line := offset_to_real_line(buffer, cursor.pos);
+        cursor.pos = get_real_line_end_offset(buffer, line);
         cursor.col_wanted = -1;
     }
 
@@ -1546,7 +1585,7 @@ break_line :: (editor: *Editor, buffer: *Buffer) {
     space_per_cursor := NewArray(editor.cursors.count, Space, initialized = false, allocator = temp);
     for cursor : editor.cursors {
         selection := get_selection(cursor);
-        start := get_line_start_offset(buffer, offset_to_line(buffer, selection.start));
+        start := get_real_line_start_offset(buffer, offset_to_real_line(buffer, selection.start));
         whitespace_bytes := count_whitespace(buffer.bytes, start, selection.start);
         space_per_cursor[it_index] = .{ start = start, count = whitespace_bytes, original_start = start };
     }
@@ -1582,11 +1621,11 @@ new_line_below :: (editor: *Editor, buffer: *Buffer) {
     line_info_per_cursor := NewArray(editor.cursors.count, Line_Info, initialized = false, allocator = temp);
     for cursor : editor.cursors {
         selection := get_selection(cursor);
-        last_line := offset_to_line(buffer, selection.end);
-        start := get_line_start_offset(buffer, last_line);
-        end   := get_line_start_offset(buffer, last_line+1);
+        last_line := offset_to_real_line(buffer, selection.end);
+        start := get_real_line_start_offset(buffer, last_line);
+        end   := get_real_line_start_offset(buffer, last_line+1);
         whitespace_bytes := count_whitespace(buffer.bytes, start, end);
-        line_info_per_cursor[it_index] = .{ end = end, space = .{ start = start, count = whitespace_bytes, original_start = start }, last_line = is_last_line(buffer, last_line) };
+        line_info_per_cursor[it_index] = .{ end = end, space = .{ start = start, count = whitespace_bytes, original_start = start }, last_line = is_last_real_line(buffer, last_line) };
     }
 
     offset_delta := 0;
@@ -1613,9 +1652,9 @@ new_line_above :: (editor: *Editor, buffer: *Buffer) {
     line_info_per_cursor := NewArray(editor.cursors.count, Line_Info, initialized = false, allocator = temp);
     for cursor : editor.cursors {
         selection  := get_selection(cursor);
-        first_line := offset_to_line(buffer, selection.start);
-        start := get_line_start_offset(buffer, first_line);
-        end   := get_line_start_offset(buffer, first_line+1);
+        first_line := offset_to_real_line(buffer, selection.start);
+        start := get_real_line_start_offset(buffer, first_line);
+        end   := get_real_line_start_offset(buffer, first_line+1);
         whitespace_bytes := count_whitespace(buffer.bytes, start, end);
         line_info_per_cursor[it_index] = .{ start = start, space = .{ start = start, count = whitespace_bytes, original_start = start } };
     }
@@ -1683,13 +1722,13 @@ delete_left_char :: (editor: *Editor, buffer: *Buffer) {
         } else if cursor.pos == 0 {
             range_per_cursor[it_index] = Offset_Range.{};
         } else {
-            coords := offset_to_coords(buffer, cursor.pos);
+            coords := offset_to_real_coords(buffer, cursor.pos);
             chars_to_delete := coords.col % TAB_SIZE;
             if coords.col == 0      then chars_to_delete = 1;
             if chars_to_delete == 0 then chars_to_delete = TAB_SIZE;
             if chars_to_delete > 1 {
                 // Don't delete more than one char unless the cursor is between line start and text start
-                whitespace_bytes := count_whitespace(buffer.bytes, get_line_start_offset(buffer, coords.line), cursor.pos);
+                whitespace_bytes := count_whitespace(buffer.bytes, get_real_line_start_offset(buffer, coords.line), cursor.pos);
                 if whitespace_bytes < coords.col then chars_to_delete = 1;
             }
             start := cursor.pos;
@@ -1814,13 +1853,13 @@ get_line_starts_for_lines_with_cursors_tmp :: (editor: *Editor, buffer: *Buffer)
     last_line_end_offset := 0;
     for cursor : editor.cursors {
         selection := get_selection(cursor);
-        start_line := offset_to_line(buffer, selection.start);
-        end_line   := ifx selection.start != selection.end then offset_to_line(buffer, selection.end) else start_line;
+        start_line := offset_to_real_line(buffer, selection.start);
+        end_line   := ifx selection.start != selection.end then offset_to_real_line(buffer, selection.end) else start_line;
         for start_line..end_line {
-            line_start := get_line_start_offset(buffer, it);
+            line_start := get_real_line_start_offset(buffer, it);
             if last_added < line_start { array_add(*line_starts, line_start); last_added = line_start; }
         }
-        last_line_end_offset = get_line_start_offset(buffer, end_line+1);
+        last_line_end_offset = get_real_line_start_offset(buffer, end_line+1);
     }
 
     return line_starts, last_line_end_offset;
@@ -1921,16 +1960,15 @@ Line_Range :: struct { prev_line_start: s32; next_line_end: s32; range: Offset_R
 get_whole_line_ranges_for_cursors :: (editor: Editor, buffer: Buffer, merge_adjacent := true, select_next_for_single_lines := false) -> [] Line_Range /* tmp */ {
     line_ranges: [..] Line_Range;
     line_ranges.allocator = temp;
-    // @line_wrap: use real_line_starts
     {
         last_end_line := -1;
         for cursor : editor.cursors {
             selection := get_selection(cursor);
-            start_line := offset_to_line(buffer, selection.start);
-            end_line   := ifx selection.start != selection.end then offset_to_line(buffer, selection.end) else start_line;
+            start_line := offset_to_real_line(buffer, selection.start);
+            end_line   := ifx selection.start != selection.end then offset_to_real_line(buffer, selection.end) else start_line;
             if start_line == end_line && select_next_for_single_lines then end_line += 1;
 
-            next_line_end := get_line_start_offset(buffer, end_line+2);
+            next_line_end := get_real_line_start_offset(buffer, end_line+2);
 
             should_extend := line_ranges.count > 0 && (
                 (merge_adjacent  && start_line <= last_end_line+1) ||
@@ -1939,18 +1977,18 @@ get_whole_line_ranges_for_cursors :: (editor: Editor, buffer: Buffer, merge_adja
 
             if should_extend {
                 // Extend last line range
-                line_ranges[line_ranges.count-1].range.end = get_line_start_offset(buffer, end_line+1);
+                line_ranges[line_ranges.count-1].range.end = get_real_line_start_offset(buffer, end_line+1);
                 line_ranges[line_ranges.count-1].next_line_end = next_line_end;
-                line_ranges[line_ranges.count-1].is_last = is_last_line(buffer, end_line);
-                line_ranges[line_ranges.count-1].is_last = !is_last_line(buffer, end_line) && is_last_line(buffer, end_line + 1);
+                line_ranges[line_ranges.count-1].is_last = is_last_real_line(buffer, end_line);
+                line_ranges[line_ranges.count-1].is_last = !is_last_real_line(buffer, end_line) && is_last_real_line(buffer, end_line + 1);
             } else {
                 // Add a new line range
                 array_add(*line_ranges, Line_Range.{
-                    prev_line_start   = get_line_start_offset(buffer, start_line-1),
+                    prev_line_start   = get_real_line_start_offset(buffer, start_line-1),
                     next_line_end     = next_line_end,
-                    range             = .{ start = get_line_start_offset(buffer, start_line), end = get_line_start_offset(buffer, end_line+1) },
-                    is_last           = is_last_line(buffer, end_line),
-                    next_line_is_last = !is_last_line(buffer, end_line) && is_last_line(buffer, end_line + 1),
+                    range             = .{ start = get_real_line_start_offset(buffer, start_line), end = get_real_line_start_offset(buffer, end_line+1) },
+                    is_last           = is_last_real_line(buffer, end_line),
+                    next_line_is_last = !is_last_real_line(buffer, end_line) && is_last_real_line(buffer, end_line + 1),
                 });
             }
             last_end_line = end_line;
@@ -2075,7 +2113,7 @@ join_lines :: (editor: *Editor, buffer: *Buffer, in_between := " ") {
         append(*b, "\n");
         add_deletion(-1);
 
-        new_str := builder_to_string(*b, do_reset = true);
+        new_str := builder_to_string(*b, allocator = temp);
         replace_range(buffer, range.range, new_str);
         add_paste_animation(editor, .{ start = range.range.start + cast(s32)first_line.count, end = range.range.start + cast(s32)new_str.count });
 
@@ -2127,29 +2165,29 @@ delete_to_start_of_line :: (editor: *Editor, buffer: *Buffer) {
     for * cursor : editor.cursors {
         selection := get_selection(cursor);
         cursor.sel = selection.end;
-        cursor.pos = get_line_start_offset(buffer, offset_to_line(buffer, selection.start));
+        cursor.pos = get_real_line_start_offset(buffer, offset_to_real_line(buffer, selection.start));
     }
     organise_cursors(editor);  // resolve overlapping selections
-    delete_left_char(editor, buffer);
+    copy_selection_to_clipboard(editor, buffer, cut = true, cut_lines_without_selection = false);
 }
 
 delete_to_end_of_line :: (editor: *Editor, buffer: *Buffer) {
     for * cursor : editor.cursors {
         selection := get_selection(cursor);
         cursor.sel = selection.start;
-        cursor.pos = get_line_end_offset(buffer, offset_to_line(buffer, selection.end));
+        cursor.pos = get_real_line_end_offset(buffer, offset_to_real_line(buffer, selection.end));
     }
     organise_cursors(editor);  // resolve overlapping selections
-    delete_right_char(editor, buffer);
+    copy_selection_to_clipboard(editor, buffer, cut = true, cut_lines_without_selection = false);
 }
 
-copy_selection_to_clipboard :: (editor: *Editor, buffer: *Buffer, cut := false) {
+copy_selection_to_clipboard :: (editor: *Editor, buffer: *Buffer, cut := false, cut_lines_without_selection := true) {
     // Check if there's anything to copy else we exit early so we don't trash the clipboard
     any_selection := false;
     for editor.cursors { if has_selection(it) { any_selection = true; break; } }
     if !any_selection && !cut && !config.settings.copy_whole_line_without_selection return;
 
-    if cut {
+    if cut && cut_lines_without_selection {
         // When cutting, cut whole lines for cursors which don't have selection.
         // The easiest thing to do is to pre-select lines before removing anything
         for * editor.cursors { if !has_selection(it) select_line(it, buffer); }
@@ -2170,8 +2208,8 @@ copy_selection_to_clipboard :: (editor: *Editor, buffer: *Buffer, cut := false) 
             selected_str := get_selected_string(cursor, buffer);
             ifx it_index != editor.cursors.count - 1 then join(selected_str, "\n") else selected_str;
         } else {
-            line_num := offset_to_line(buffer, cursor.pos);
-            get_line_as_string(buffer, line_num);
+            line_num := offset_to_real_line(buffer, cursor.pos);
+            get_real_line_as_string(buffer, line_num);
         }
         append(*b, str);
 
@@ -2223,14 +2261,15 @@ paste_from_clipboard :: (editor: *Editor, buffer: *Buffer) {
 
         // If there is only one slice without selection, insert slice at cursor line
         if !has_selection(cursor) && clipboard.slices.count == 1 && !clipboard.slices[0].was_selected {
-            line_num   := offset_to_line(buffer, cursor.pos);
-            line_start := get_line_start_offset(buffer, line_num);
+            line_num   := offset_to_real_line(buffer, cursor.pos);
+            line_start := get_real_line_start_offset(buffer, line_num);
             str        := clipboard.text;
 
             // insert_string_at_offset() make the buffer dirty
             // we rescan to clean it else we can't call offset_to_line for the next cursors
             insert_string_at_offset(buffer, line_start, str);
             rescan_for_lines(buffer);
+            if line_wrap_is_active(editor) then rescan_for_wrapped_lines(editor, buffer);
 
             cursor.pos   += xx str.count;
             offset_delta += str.count;
@@ -2462,11 +2501,26 @@ toggle_block_comment :: (editor: *Editor, buffer: *Buffer) {
     editor.cursor_moved = .unimportant;
 }
 
+toggle_line_wrap :: (editor: *Editor) {
+    if line_wrap_is_active(editor) {
+        editor.line_wrap = .to_disable;
+    } else {
+        editor.line_wrap = .to_enable;
+    }
+    redraw_requested = true;
+}
+
+toggle_line_numbers :: () {
+    config.settings.show_line_numbers = !config.settings.show_line_numbers;
+    redraw_requested = true;
+}
+
 free_editor :: (using editor: *Editor) {
     array_reset(*cursors);
     array_reset(*paste_animations);
     array_reset(*highlights);
     array_reset(*search_bar.results);
+    array_reset(*wrapped_line_starts);
 }
 
 #scope_export
@@ -2481,6 +2535,7 @@ Editor :: struct {
     search_whole_words := false;  // used when creating new cursors
     cursor_moved := Cursor_Movement.has_not_moved; // this may trigger a scroll so that the cursor is within acceptable bounds
 
+    // TODO: use a global flag rather than per editor?
     new_cursor_just_created_using_mouse := false;  // useful to know in order to handle select-by-drag and select-word with the new cursor
     last_cursor_created_using_mouse_at: Time;
 
@@ -2493,6 +2548,10 @@ Editor :: struct {
     search_bar: Search_Bar;
 
     viewport: Viewport;
+
+    line_wrap: enum u8 { off; to_enable; to_disable; on; };
+    last_width_in_chars: s32 = S32_MAX;
+    wrapped_line_starts: [..] s32;  // empty when line wrap is off
 
     paste_animations: [..] Paste_Animation;
 }
@@ -2518,8 +2577,6 @@ Viewport :: struct {
     glue_point: Glue_Point;
     scroll_y := #run Tween_Animation(s32).{ speed = xx 0.1, func = .lerp };
     scroll_x := #run Tween_Animation(s32).{ speed = xx 0.1, func = .lerp };
-
-    max_line_pixel_width: s32;
 
     Glue_Point :: struct { buffer_pos: s32; offset_within_line: s32; }
 }
@@ -2756,24 +2813,34 @@ frames_are_mergeable :: (a: Editor_History_Frame, b: Editor_History_Frame) -> bo
         && a.editor_state == b.editor_state;
 }
 
-move_to_previous_editor_history :: () {
+move_to_previous_editor_history :: (by_buffer := false) {
     using editor_history;
     // print("BACK: current: %, start: %, end: %\n", current, start, end);
     if current == start return;
 
     old_frame := frames[current];
     current = previous_history_index(current);
+    if by_buffer {
+        while current != start && old_frame.editor_state == frames[current].editor_state {
+            current = previous_history_index(current);
+        }
+    }
     move_to_editor_history_frame(frames[current], old_frame);
     // print("   -> current: %, start: %, end: %. RESTORE: %\n", current, start, end, frames[current]);
 }
 
-move_to_next_editor_history :: () {
+move_to_next_editor_history :: (by_buffer := false) {
     using editor_history;
     // print("FORW: current: %, start: %, end: %\n", current, start, end);
     if current == end return;
 
     old_frame := frames[current];
     current = next_history_index(current);
+    if by_buffer {
+        while current != end && old_frame.editor_state == frames[current].editor_state {
+            current = next_history_index(current);
+        }
+    }
     move_to_editor_history_frame(frames[current], old_frame);
     // print("   -> current: %, start: %, end: %. RESTORE: %\n", current, start, end, frames[current]);
 }

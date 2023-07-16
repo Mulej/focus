@@ -204,6 +204,8 @@ commands := #run Command.[
     //       those to users.  Or just leave them commented out / remove them entirely.
     //.{ .dump_key_mappings,                                  "Dump Key Mappings",                  0, .None },
     //.{ .dump_editor_history,                                "Dump Editor History",                0, .None },
+    .{ .toggle_line_wrap,                                   "Toggle Line Wrap",                   0, .Single },
+    .{ .toggle_line_numbers,                                "Toggle Line Numbers",                0, .Single },
 ];
 
 Command :: struct {
