@@ -1,4 +1,14 @@
 main :: () {
+    // Use rpmalloc
+    rpmalloc.rpmalloc_allocator_proc(.STARTUP, 0, 0, null, null);
+    context.allocator = Allocator.{rpmalloc.rpmalloc_allocator_proc, null};
+
+    // TODO: investigate a crash when creating new cursors while using this allocator
+    // #if DEBUG {
+    //     UA :: #import "Unmapping_Allocator";
+    //     context.allocator = UA.get_unmapping_allocator();
+    // }
+
     cpu_info = get_cpu_info();
 
     platform_setup();
@@ -133,7 +143,7 @@ main :: () {
         screen_with_title_bar := screen;
         screen_with_title_bar.h += 200;  // should be enough to include the title bar
 
-        #if OS != .WINDOWS {
+        #if OS == .MACOS {
             nothing_to_do_this_frame := !redraw_requested && !Input.events_this_frame.count && !mouse.moved_this_frame;
 
             if !Input.input_application_has_focus && nothing_to_do_this_frame {
@@ -243,10 +253,12 @@ main :: () {
                     case .editors;                  handled = editors_handle_event(event);
                     case .finder;                   handled = finder_handle_event(event);
                     case .open_file_dialog;         handled = open_file_dialog_handle_event(event);
+                    case .save_file_dialog;         handled = save_file_dialog_handle_event(event);
+                    case .delete_file_dialog;       handled = delete_file_dialog_handle_event(event);
                     case .go_to_line_dialog;        handled = go_to_line_dialog_handle_event(event);
+                    case .open_project_dialog;      handled = open_project_dialog_handle_event(event);
                     case .unsaved_buffers_dialog;   handled = unsaved_buffers_dialog_handle_event(event);
                     case .commands_dialog;          handled = commands_dialog_handle_event(event);
-                    case .open_project_dialog;      handled = open_project_dialog_handle_event(event);
                 }
             }
 
@@ -666,10 +678,12 @@ active_global_widget: enum {
     editors;
     finder;
     open_file_dialog;
+    save_file_dialog;
+    delete_file_dialog;
     go_to_line_dialog;
     commands_dialog;
-    unsaved_buffers_dialog;
     open_project_dialog;
+    unsaved_buffers_dialog;
 } = .editors;
 
 Project_Dir :: struct {
@@ -708,6 +722,8 @@ dont_ignore_next_window_resize := false;
 
 #load "widgets/text_input.jai";
 #load "widgets/open_file_dialog.jai";
+#load "widgets/save_file_dialog.jai";
+#load "widgets/delete_file_dialog.jai";
 #load "widgets/go_to_line_dialog.jai";
 #load "widgets/finder.jai";
 #load "widgets/unsaved_buffers.jai";
@@ -718,6 +734,7 @@ dont_ignore_next_window_resize := false;
 #load "langs/c.jai";
 #load "langs/csharp.jai";
 #load "langs/focus_config.jai";
+#load "langs/glsl.jai";
 #load "langs/worklog.jai";
 
 #if OS == .WINDOWS {
@@ -731,9 +748,8 @@ dont_ignore_next_window_resize := false;
     #assert false, "Unsupported OS";
 }
 
-// #import "Basic"()(MEMORY_DEBUGGER = true);
 #import "Atomics";
-#import "Basic";
+#import "Basic"()(MEMORY_DEBUGGER = DEBUG);
 #import "Math";
 #import "Sloppy_Math";
 #import "File";
@@ -756,6 +772,7 @@ dont_ignore_next_window_resize := false;
 
 File_Async :: #import "File_Async";
 
+rpmalloc :: #import "rpmalloc";
 Simp  :: #import "Simp";
 Input :: #import "Input";
 

@@ -300,7 +300,10 @@ MyWindowProc :: (hwnd: HWND, message: u32,
             event: Event;
             event.type = .QUIT;
             array_add(*events_this_frame, event);
-         // return DefWindowProcW(hwnd, message, wParam, lParam);
+
+            // NOTE: we're not calling the default proc here because it would just close the window,
+            // while we might want to show a confirmation dialog when there are unsaved files
+            // return DefWindowProcW(hwnd, message, wParam, lParam);
 
           case WM_INPUT;
             extra := GetMessageExtraInfo();
@@ -357,7 +360,7 @@ MyWindowProc :: (hwnd: HWND, message: u32,
             array_reserve(*files, file_paths_count);
 
             for i: 0..file_paths_count-1 {
-                // If nulll as the third parameter: return the length of the path, not counting the trailing '\0'.
+                // If null as the third parameter: return the length of the path, not counting the trailing '\0'.
                 file_name_wide_count := DragQueryFileW(drop, i, null, 0) + 2;
                 assert(file_name_wide_count > 0);
 
